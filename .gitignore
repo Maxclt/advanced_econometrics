@@ -1,0 +1,6 @@
+*.pyc
+*.RData
+*.ipynb_checkpoints/
+data/raw/*
+data/processed/*
+results/*
