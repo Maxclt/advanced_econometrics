@@ -1,0 +1,219 @@
+---
+title: "data_summary"
+output: html_document
+---
+
+# Library
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(haven)
+library(readr)
+library(janitor)   # for cleaning column names
+library(data.table)  # optional for faster operations``
+library(purrr)
+library(ggplot2)
+library(lubridate)
+library(stats)
+library(fixest)
+```
+
+# Import Data
+
+```{r}
+main_panel <- read_dta("data/minwage/QCEWindustry_minwage_all.dta") %>%
+  clean_names()
+contig_panel <- read_dta("data/minwage/QCEWindustry_minwage_contig.dta") %>%
+  clean_names()
+```
+
+```{r}
+main_panel %>% names()
+```
+
+# Descriptive Statistics
+
+## County Spec
+
+### Summary Stats
+
+```{r}
+# Select rows where nonmissing_rest_both == 66
+subset_main <- main_panel %>% filter(nonmissing_rest_both == 66)
+
+# Variables for summary
+j_vars <- c("countypop2000", "cntypopdens", "cntyarea", "emp_rest_both", "aww_rest_both", "minwage")
+
+# Summary stats
+summary_j <- subset_main %>%
+  summarise(across(all_of(j_vars), list(
+  mean = \(x) mean(x, na.rm = TRUE),
+  sd   = \(x) sd(x, na.rm = TRUE)
+)))
+
+# Industry-specific vars
+k_vars <- c("acfsretail", "retail", "mfg", "tot")
+emp_summary <- map_dfr(k_vars, function(k) {
+  subset_main %>%
+    summarise(
+      emp_mean = mean(.data[[paste0("emp_", k)]], na.rm = TRUE),
+      emp_sd   = sd(.data[[paste0("emp_", k)]], na.rm = TRUE),
+      aww_mean = mean(.data[[paste0("aww", k)]], na.rm = TRUE),
+      aww_sd   = sd(.data[[paste0("aww", k)]], na.rm = TRUE)
+    ) %>%
+    mutate(industry = k)
+})
+```
+
+### Sample Size
+
+```{r}
+n_counties <- subset_main %>%
+  count(county, name = "count") %>%
+  summarise(n_distinct = n_distinct(county)) %>%
+  pull(n_distinct)
+```
+
+### Events
+
+```{r}
+main_panel <- main_panel %>%
+  mutate(
+    fedevent = as.integer(event_type == 1),
+    stateevent = as.integer(event_type == 2)
+  ) %>%
+  group_by(county) %>%
+  mutate(
+    fedeventspercounty = sum(fedevent, na.rm = TRUE),
+    steventspercounty  = sum(stateevent, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Summarise those for descriptive table
+main_panel %>%
+  filter(nonmissing_rest_both == 66) %>%
+  summarise(
+    mean_fedevents = mean(fedeventspercounty),
+    mean_stevents  = mean(steventspercounty)
+  )
+```
+
+## Contig Spec
+
+### Summary Stats
+
+```{r}
+subset_contig <- contig_panel %>% filter(nonmissing_rest_both == 66)
+
+# Same j variable summary
+summary_contig_j <- subset_contig %>%
+  summarise(across(all_of(j_vars), list(
+  mean = \(x) mean(x, na.rm = TRUE),
+  sd   = \(x) sd(x, na.rm = TRUE)
+)))
+
+# Same k variable summary
+summary_contig_k <- map_dfr(k_vars, function(k) {
+  subset_contig %>%
+    summarise(
+      emp_mean = mean(.data[[paste0("emp_", k)]], na.rm = TRUE),
+      emp_sd   = sd(.data[[paste0("emp_", k)]], na.rm = TRUE),
+      aww_mean = mean(.data[[paste0("aww", k)]], na.rm = TRUE),
+      aww_sd   = sd(.data[[paste0("aww", k)]], na.rm = TRUE)
+    ) %>%
+    mutate(industry = k)
+})
+
+```
+
+### Sample Size
+
+```{r}
+n_counties_contig <- subset_contig %>% distinct(county) %>% count()
+n_pairs_contig <- contig_panel %>%
+  filter(nonmissing_both_pair == 66) %>%
+  distinct(pair_id) %>%
+  count()
+```
+
+### Events
+
+## Time-Series Overview
+
+```{r}
+state_minwage_states <- c(
+  "Alaska", "California", "Connecticut", "Delaware", "Florida", "Hawaii",
+  "Illinois", "Maine", "Massachusetts", "Minnesota", "New Jersey", "New York",
+  "Oregon", "Rhode Island", "Vermont", "Washington", "Wisconsin", "District of Columbia"
+)
+
+main_panel <- main_panel %>%
+  mutate(
+    scaleminwage = if_else(statename %in% state_minwage_states, "state", "federal"),
+    yearquarter = make_date(year, (quarter - 1) * 3 + 1, 1)
+  )
+
+# Summary for plot/table
+employment_timeseries <- main_panel %>%
+  group_by(scaleminwage, yearquarter) %>%
+  summarise(emp_tot = sum(emp_tot, na.rm = TRUE), .groups = "drop_last") %>%
+  arrange(yearquarter) %>%
+  reframe(
+    yearquarter = yearquarter,
+    emp_tot = emp_tot,
+    emp_tot_yoy = (emp_tot - lag(emp_tot, 4)) / lag(emp_tot, 4),
+  ) %>%
+  ungroup()
+```
+
+```{r}
+ggplot(employment_timeseries, aes(x = yearquarter, y = emp_tot_yoy, color = scaleminwage, group = scaleminwage)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Employment Over Time by Minimum Wage Type",
+    x = "Quarter",
+    y = "Total Employment",
+    color = "Min Wage Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+### Correlogram
+
+```{r}
+state_emp_ts <- main_panel %>%
+  group_by(state_name, yearquarter) %>%
+  summarise(emp_tot = sum(emp_tot, na.rm = TRUE), .groups = "drop_last") %>%
+  arrange(yearquarter) %>%
+  reframe(
+    yearquarter = yearquarter,
+    emp_tot = emp_tot,
+    emp_tot_yoy = (emp_tot - lag(emp_tot, 4)) / lag(emp_tot, 4),
+  ) %>%
+  ungroup() %>%
+  drop_na()
+```
+
+```{r}
+mod <- feols(emp_tot_yoy ~ 1 | state_name + yearquarter, data = state_emp_ts)
+state_emp_ts$fe_residuals <- resid(mod)
+summary(mod)
+```
+
+```{r}
+mean_resids <-state_emp_ts %>%
+  group_by(yearquarter) %>%
+  summarize(mean_resid_yq = mean(fe_residuals, na.rm = TRUE))
+
+ggplot(mean_resids, aes(x = yearquarter, y = mean_resid_yq)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Employement Mean State-Year residuals",
+    x = "Quarter",
+    y = "Total Employment"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+

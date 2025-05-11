@@ -4,3 +4,6 @@
 data/raw/*
 data/processed/*
 results/*
+.Rproj.user
+data/*
+minwage_dubeRESTAT/*
